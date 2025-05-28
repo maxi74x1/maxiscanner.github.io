@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Photogrammetry Demo (Single File)</title>
+    <!-- Include OpenCV.js -->
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+            margin: 0;
+            flex-direction: column;
+        }
+
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .video-container {
+            position: relative;
+            width: 640px; /* Adjust as needed */
+            height: 480px; /* Adjust as needed */
+            border: 1px solid #ccc;
+            margin: 20px auto;
+            background-color: #333; /* Added for better visual of darkened video */
+        }
+
+        #videoFeed {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .controls button {
+            padding: 10px 15px;
+            margin: 5px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .controls button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .controls button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+
+        #status {
+            margin-top: 10px;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web Photogrammetry Concept</h1>
+        <p>Point camera at a textured object. Click 'Start Camera', then 'Capture Keyframe'.</p>
+        <div class="video-container">
+            <video id="videoFeed" autoplay playsinline></video>
+            <canvas id="overlayCanvas"></canvas>
+        </div>
+        <div class="controls">
+            <button id="startButton">Start Camera</button>
+            <button id="captureKeyframeButton" disabled>Capture Keyframe</button>
+            <p id="status">Status: OpenCV loading...</p>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        // Make sure 'cv' is globally available or handle errors if not
+        // This script block will execute AFTER the OpenCV.js script tag is parsed,
+        // but OpenCV.js itself loads asynchronously.
+        // The `onOpenCvReady` function is the reliable entry point.
+
+        const video = document.getElementById('videoFeed');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const captureKeyframeButton = document.getElementById('captureKeyframeButton');
+        const statusElement = document.getElementById('status');
+
+        let stream;
+        let cvReady = false;
+        let orb; // ORB detector
+        let keyframeDescriptors = null;
+        let keyframeKeypoints = null; // Will store cv.KeyPointVector objects
+
+        // This function is called by the OpenCV.js script tag's onload attribute
+        function onOpenCvReady() {
+            if (cv && cv.getBuildInformation) {
+                console.log("OpenCV.js version:", cv.getBuildInformation());
+                statusElement.textContent = "Status: OpenCV.js is ready.";
+                cvReady = true;
+                try {
+                    orb = new cv.ORB(); // Initialize ORB detector
+                    // Enable capture button only if camera has started or is ready to start
+                    if (stream || !startButton.disabled) { // A bit of a guess here, safer to enable in startCamera
+                         // captureKeyframeButton.disabled = false; // Will be enabled after camera starts
+                    }
+                } catch (e) {
+                    statusElement.textContent = "Error initializing OpenCV ORB detector.";
+                    console.error("OpenCV ORB init error:", e);
+                    cvReady = false; // Mark as not ready if ORB fails
+                }
+            } else {
+                statusElement.textContent = "Status: OpenCV.js loaded, but 'cv' object or 'getBuildInformation' not found. Retrying...";
+                console.warn("OpenCV.js 'cv' object not immediately available or not fully initialized.");
+                // Fallback for environments where cv.getBuildInformation is not available or timing issues
+                // This might indicate a problem with the OpenCV.js load or a very fast browser.
+                // We can try a small delay and re-check.
+                setTimeout(() => {
+                    if (cv && typeof cv.ORB === 'function') { // Check for a specific function
+                        console.log("OpenCV.js seems ready on retry.");
+                        statusElement.textContent = "Status: OpenCV.js is ready (on retry).";
+                        cvReady = true;
+                        orb = new cv.ORB();
+                    } else {
+                        statusElement.textContent = "Status: Failed to initialize OpenCV.js. Please reload.";
+                        console.error("OpenCV.js failed to initialize properly.");
+                    }
+                }, 1000); // Wait 1 second and try again
+            }
+        }
+
+        async function startCamera() {
+            if (!cvReady) {
+                statusElement.textContent = "Status: OpenCV not ready. Please wait or reload.";
+                // Attempt to call onOpenCvReady again if it seems like it hasn't run
+                if (typeof cv !== 'undefined' && !orb) {
+                    console.log("Attempting to re-run onOpenCvReady logic from startCamera");
+                    onOpenCvReady(); // Try to initialize ORB again
+                    if (!cvReady) { // If still not ready after re-attempt
+                        return;
+                    }
+                } else if (typeof cv === 'undefined') {
+                    return;
+                }
+            }
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 },
+                    audio: false
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    overlayCanvas.width = video.videoWidth;
+                    overlayCanvas.height = video.videoHeight;
+                    statusElement.textContent = "Status: Camera started. Ready to capture keyframe.";
+                    captureKeyframeButton.disabled = false; // Enable keyframe button
+                    startButton.disabled = true;
+                    startButton.textContent = "Camera Active";
+                    requestAnimationFrame(drawLoop);
+                };
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                statusElement.textContent = `Error: ${err.name} - ${err.message}. Ensure camera access is allowed.`;
+                if (err.name === "NotAllowedError") {
+                    statusElement.textContent += " Please allow camera permissions in your browser settings.";
+                }
+            }
+        }
+
+        function captureCurrentFrameIntoMat() {
+            if (!video.videoWidth || !video.videoHeight || video.paused || video.ended) {
+                 console.warn("Video not ready for frame capture.");
+                 return null;
+            }
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+            try {
+                let frameMat = cv.imread(tempCanvas);
+                return frameMat;
+            } catch (e) {
+                console.error("Error in cv.imread:", e);
+                statusElement.textContent = "Error processing frame with OpenCV.";
+                return null;
+            }
+        }
+
+        function captureKeyframe() {
+            if (!cvReady || !orb) {
+                statusElement.textContent = "Status: OpenCV or ORB detector not ready.";
+                if (typeof cv !== 'undefined' && !orb) onOpenCvReady(); // try to re-init
+                return;
+            }
+            if (!stream || video.paused || video.ended) {
+                statusElement.textContent = "Status: Camera not active.";
+                return;
+            }
+
+            statusElement.textContent = "Status: Capturing keyframe & detecting features...";
+
+            let frameMat = captureCurrentFrameIntoMat();
+            if (!frameMat) {
+                statusElement.textContent = "Status: Could not capture frame for keyframe.";
+                return;
+            }
+
+            let grayMat = new cv.Mat();
+            cv.cvtColor(frameMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+            if (keyframeDescriptors) keyframeDescriptors.delete();
+            if (keyframeKeypoints) keyframeKeypoints.delete();
+
+            keyframeKeypoints = new cv.KeyPointVector();
+            keyframeDescriptors = new cv.Mat();
+            let mask = new cv.Mat(); // Optional mask for detection
+
+            try {
+                orb.detectAndCompute(grayMat, mask, keyframeKeypoints, keyframeDescriptors);
+
+                if (keyframeKeypoints.size() > 0) {
+                    statusElement.textContent = `Status: Keyframe. ${keyframeKeypoints.size()} features found.`;
+                    console.log(`Keyframe: ${keyframeKeypoints.size()} features.`);
+                } else {
+                    statusElement.textContent = "Status: Keyframe captured, no features. Try a more textured scene.";
+                }
+            } catch (e) {
+                console.error("Error during feature detection:", e);
+                statusElement.textContent = "Error during feature detection. See console.";
+            } finally {
+                // Clean up OpenCV Mats
+                grayMat.delete();
+                frameMat.delete();
+                mask.delete();
+            }
+        }
+
+        function drawLoop() {
+            if (!stream || video.paused || video.ended) {
+                if (stream) requestAnimationFrame(drawLoop); // Keep trying if stream exists but paused
+                return;
+            }
+
+            // 1. Draw darkened live camera feed onto the overlay canvas
+            overlayCtx.globalAlpha = 0.4; // Darken factor (0.0 fully transparent, 1.0 fully opaque)
+            overlayCtx.drawImage(video, 0, 0, overlayCanvas.width, overlayCanvas.height);
+            overlayCtx.globalAlpha = 1.0; // Reset alpha for subsequent drawing
+
+            // 2. Overlay keyframe points
+            if (keyframeKeypoints && keyframeKeypoints.size() > 0) {
+                overlayCtx.fillStyle = 'white';
+                for (let i = 0; i < keyframeKeypoints.size(); ++i) {
+                    const kp = keyframeKeypoints.get(i); // kp.pt.x, kp.pt.y
+                    // Draw a small bright white square for each keypoint
+                    overlayCtx.fillRect(kp.pt.x - 1, kp.pt.y - 1, 3, 3); // 3x3 square, centered
+                }
+            }
+            requestAnimationFrame(drawLoop);
+        }
+
+        // Event Listeners
+        startButton.addEventListener('click', startCamera);
+        captureKeyframeButton.addEventListener('click', captureKeyframe);
+
+        // Initial status message
+        statusElement.textContent = "Status: Click 'Start Camera'. OpenCV is loading...";
+
+        // Check if OpenCV might have loaded *before* this script block finished parsing
+        // and before onOpenCvReady was set up. This is less likely with `async`
+        // but good to be aware of.
+        if (typeof cv !== 'undefined' && cv.getBuildInformation && !cvReady) {
+             console.log("OpenCV was already defined. Calling onOpenCvReady manually.");
+             onOpenCvReady();
+        }
+
+    </script>
+</body>
+</html>
