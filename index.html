@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Web 3D Scanner Concept - SfM Attempt</title>
+    <title>Web 3D Scanner Concept - SfM Attempt v2</title>
     <!-- OpenCV.js -->
-    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvScriptLoad();" type="text/javascript"></script>
     <!-- THREE.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <!-- GLTFExporter for THREE.js -->
@@ -63,11 +63,66 @@
         let orb, bfMatcher; // OpenCV objects
         let isScanning = false;
         let scanProcessIntervalId = null;
-        const SCAN_INTERVAL_MS = 750; // Slower for potentially more distinct frames
-        let scanFramesData = []; // Stores { timestamp, cvKeypoints (cv.KeyPointVector), cvDescriptors (cv.Mat) }
-        let displayKeypointsVector = null; // For live overlay
-        let K_matrix = null, distCoeffs = null; // Camera Intrinsics
+        const SCAN_INTERVAL_MS = 750;
+        let scanFramesData = [];
+        let displayKeypointsVector = null;
+        let K_matrix = null, distCoeffs = null;
         let threeScene, threeCamera, threeRenderer, threePointsObject = null;
+
+        // --- OpenCV Loading Logic ---
+        let cvPollInterval = null;
+        let cvPollCount = 0;
+        const MAX_CV_POLLS = 50; // Wait up to 10 seconds (50 * 200ms)
+
+        function onOpenCvScriptLoad() {
+            console.log("OpenCV SCRIPT TAG onload event fired.");
+            // This function is called when the script tag itself has loaded.
+            // It doesn't guarantee 'cv' object is ready yet, that happens inside the script.
+            // Start polling immediately as 'cv' might initialize very quickly after this.
+            if (!cvReady) {
+                startCvPolling();
+            }
+        }
+
+        function initializeOpenCVComponents() {
+            console.log("Attempting to initialize OpenCV components (ORB, BFMatcher).");
+            try {
+                orb = new cv.ORB(500);
+                bfMatcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                cvReady = true; // Mark as truly ready
+                updateStatus("OpenCV Ready.");
+                console.log("OpenCV components initialized successfully.");
+            } catch (e) {
+                updateStatus("Error Initializing OpenCV Components");
+                console.error("Error during new cv.ORB() or new cv.BFMatcher():", e);
+                cvReady = false; // Explicitly mark as not ready
+            }
+            checkAppReady(); // Update UI based on cvReady state
+        }
+
+        function startCvPolling() {
+            console.log("Starting polling for 'cv' object...");
+            if (cvPollInterval) clearInterval(cvPollInterval); // Clear any existing poller
+
+            cvPollInterval = setInterval(() => {
+                cvPollCount++;
+                console.log(`Polling for 'cv' (attempt ${cvPollCount}). Typeof cv: ${typeof cv}`);
+                if (typeof cv !== 'undefined' && cv.getBuildInformation) {
+                    console.log("OpenCV 'cv' object found and has getBuildInformation. Build info:", cv.getBuildInformation());
+                    clearInterval(cvPollInterval);
+                    cvPollInterval = null;
+                    initializeOpenCVComponents();
+                } else if (cvPollCount >= MAX_CV_POLLS) {
+                    clearInterval(cvPollInterval);
+                    cvPollInterval = null;
+                    updateStatus("Error: OpenCV.js timed out loading.");
+                    console.error("OpenCV.js 'cv' object did not become available after polling.");
+                    cvReady = false; // Ensure it's marked as not ready
+                    checkAppReady();
+                }
+            }, 200);
+        }
+
 
         // --- Utility Functions ---
         function showLoading(message) { loadingIndicator.innerHTML = message; loadingIndicator.style.display = 'block'; }
@@ -75,30 +130,15 @@
         function updateStatus(message) { statusElement.textContent = message; console.log("Status:", message); }
 
         // --- Initialization ---
-        function onOpenCvReady() {
-            if (cv && cv.getBuildInformation) {
-                console.log("OpenCV.js version:", cv.getBuildInformation());
-                cvReady = true;
-                try {
-                    orb = new cv.ORB(500); // Max 500 features
-                    bfMatcher = new cv.BFMatcher(cv.NORM_HAMMING, false); // CrossCheck false for knnMatch
-                    updateStatus("OpenCV Ready.");
-                } catch (e) { updateStatus("Error OpenCV Init"); console.error("OpenCV ORB/Matcher init error:", e); cvReady = false; }
-            } else { updateStatus("Error: OpenCV.js load fail."); console.error("OpenCV.js 'cv' object not ready."); }
-            checkAppReady();
-        }
-
         function checkThreeJsReady() {
             if (typeof THREE !== 'undefined' && THREE.GLTFExporter) {
                 console.log("THREE.js and GLTFExporter ready.");
                 threeReady = true;
-                // Basic THREE.js setup for later (not rendering yet)
                 threeScene = new THREE.Scene();
                 threeScene.background = new THREE.Color(0x333333);
                 threeCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.001, 1000);
-                threeCamera.position.z = 2; // Initial camera position for viewing points
-                // Renderer will be setup if/when needed for display, not done here to save resources
-            } else { updateStatus("Error: THREE.js load fail."); console.error("THREE.js or GLTFExporter not found."); }
+                threeCamera.position.z = 2;
+            } else { updateStatus("Error: THREE.js load fail."); console.error("THREE.js or GLTFExporter not found."); threeReady = false; }
             checkAppReady();
         }
 
@@ -107,12 +147,18 @@
                 updateStatus("App Ready. Init Camera.");
                 initCameraButton.disabled = false;
                 hideLoading();
-            } else { showLoading(`Loading:<br>${cvReady ? "✔️" : "⏳"} OpenCV<br>${threeReady ? "✔️" : "⏳"} THREE.js`); }
+            } else {
+                let loadingMsg = "Loading:<br>";
+                if (!cvReady) loadingMsg += "⏳ OpenCV<br>";
+                if (!threeReady) loadingMsg += "⏳ THREE.js";
+                showLoading(loadingMsg);
+                console.log(`App not fully ready: cvReady=${cvReady}, threeReady=${threeReady}`);
+            }
         }
 
         // --- Camera ---
         async function initCamera() {
-            if (!cvReady) { updateStatus("OpenCV not ready."); return; }
+            if (!cvReady) { updateStatus("OpenCV not ready for camera."); return; }
             initCameraButton.disabled = true;
             showLoading("Initializing Camera...");
             const commonConstraints = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } };
@@ -136,31 +182,21 @@
                 video.play().catch(e => console.error("Video play error:", e));
                 overlayCanvas.width = video.videoWidth;
                 overlayCanvas.height = video.videoHeight;
-                
-                // Initialize K_matrix (Camera Intrinsics) - VERY ROUGH GUESS
-                const W = video.videoWidth;
-                const H = video.videoHeight;
-                const focalLengthGuess = (W + H) / 2; // Extremely rough guess
-                K_matrix = cv.matFromArray(3, 3, cv.CV_64F, [
-                    focalLengthGuess, 0, W / 2,
-                    0, focalLengthGuess, H / 2,
-                    0, 0, 1
-                ]);
-                distCoeffs = cv.Mat.zeros(4, 1, cv.CV_64F); // Assume no lens distortion
-
+                const W = video.videoWidth; const H = video.videoHeight;
+                const focalLengthGuess = (W + H) / 2;
+                K_matrix = cv.matFromArray(3, 3, cv.CV_64F, [focalLengthGuess, 0, W / 2, 0, focalLengthGuess, H / 2, 0, 0, 1]);
+                distCoeffs = cv.Mat.zeros(4, 1, cv.CV_64F);
                 updateStatus(`${cameraName} Ready. Start Scan.`);
-                startScanButton.disabled = false;
-                initCameraButton.style.display = 'none';
-                hideLoading();
+                startScanButton.disabled = false; initCameraButton.style.display = 'none'; hideLoading();
                 requestAnimationFrame(drawLoop);
             };
         }
 
         // --- Scanning ---
         function startScan() {
-            if (!cvReady || !orb || !stream || video.paused) { updateStatus("Error: Not ready to scan."); return; }
+            if (!cvReady || !orb || !bfMatcher || !stream || video.paused) { updateStatus("Error: Not ready to scan."); return; }
             isScanning = true;
-            scanFramesData.forEach(frame => { frame.cvKeypoints.delete(); frame.cvDescriptors.delete(); }); // Clear previous scan
+            scanFramesData.forEach(frame => { frame.cvKeypoints.delete(); frame.cvDescriptors.delete(); });
             scanFramesData = [];
             frameCountElement.textContent = "Frames: 0";
             startScanButton.disabled = true; stopScanButton.disabled = false;
@@ -176,7 +212,7 @@
             startScanButton.disabled = false; stopScanButton.disabled = true;
             updateStatus(`Scan finished. ${scanFramesData.length} frames.`);
             if (scanFramesData.length >= 2) reconstructButton.disabled = false;
-            if (threePointsObject) exportButton.disabled = false; // If reconstruction was done
+            if (threePointsObject) exportButton.disabled = false;
         }
 
         function captureCurrentFrameToMat() {
@@ -189,78 +225,51 @@
 
         function processFrameForScan() {
             if (!isScanning || !cvReady || !orb) return;
-            let frameMat = captureCurrentFrameToMat();
-            if (!frameMat) return;
-
-            let grayMat = new cv.Mat();
-            cv.cvtColor(frameMat, grayMat, cv.COLOR_RGBA2GRAY);
-            let kpVec = new cv.KeyPointVector();
-            let descMat = new cv.Mat();
-            let mask = new cv.Mat(); // Optional mask
-
+            let frameMat = captureCurrentFrameToMat(); if (!frameMat) return;
+            let grayMat = new cv.Mat(); cv.cvtColor(frameMat, grayMat, cv.COLOR_RGBA2GRAY);
+            let kpVec = new cv.KeyPointVector(); let descMat = new cv.Mat(); let mask = new cv.Mat();
             try {
                 orb.detectAndCompute(grayMat, mask, kpVec, descMat);
                 if (kpVec.size() > 0) {
-                    scanFramesData.push({
-                        timestamp: Date.now(),
-                        cvKeypoints: kpVec, // WARNING: kpVec will be deleted if not cloned or used carefully
-                        cvDescriptors: descMat.clone() // CLONE descriptors
-                    });
-                    // For display, we use the latest kpVec. If it's the one we just pushed,
-                    // it's okay, but if we were to delete kpVec here, display would break.
+                    scanFramesData.push({ timestamp: Date.now(), cvKeypoints: kpVec, cvDescriptors: descMat.clone() });
                     if (displayKeypointsVector) displayKeypointsVector.delete();
-                    displayKeypointsVector = kpVec; // kpVec is now owned by displayKeypointsVector
-                } else {
-                    kpVec.delete(); // No features, delete
-                    descMat.delete();
-                }
+                    displayKeypointsVector = kpVec; // kpVec now owned by displayKeypointsVector
+                } else { kpVec.delete(); descMat.delete(); }
                 frameCountElement.textContent = `Frames: ${scanFramesData.length}`;
             } catch (e) {
                 console.error("Error in ORB detect/compute:", e);
-                if (kpVec && !kpVec.isDeleted()) kpVec.delete();
-                if (descMat && !descMat.isDeleted()) descMat.delete();
-            } finally {
-                frameMat.delete(); grayMat.delete(); mask.delete();
-                // descMat was cloned or deleted. kpVec is now displayKeypointsVector or deleted.
-            }
+                if (kpVec && !kpVec.isDeleted()) kpVec.delete(); if (descMat && !descMat.isDeleted()) descMat.delete();
+            } finally { frameMat.delete(); grayMat.delete(); mask.delete(); }
         }
 
         // --- 3D Reconstruction (SfM) ---
         async function reconstruct3D() {
             if (scanFramesData.length < 2) { updateStatus("Need at least 2 scan frames."); return; }
             if (!K_matrix) { updateStatus("Camera intrinsics not ready."); return; }
+            if (!cvReady || !bfMatcher) { updateStatus("OpenCV components not ready for reconstruction."); return; }
+
 
             reconstructButton.disabled = true; exportButton.disabled = true;
-            showLoading("Reconstructing 3D (This can be SLOW)...<br>Processing Frame 1 and Last Frame.");
-            await new Promise(resolve => setTimeout(resolve, 100)); // Allow UI update
+            showLoading("Reconstructing 3D (SLOW)...<br>Processing Frame 1 and Last Frame.");
+            await new Promise(resolve => setTimeout(resolve, 100));
 
-            // For simplicity, use first and last frame
-            const frameA_idx = 0;
-            const frameB_idx = scanFramesData.length - 1;
-            const frameA = scanFramesData[frameA_idx];
-            const frameB = scanFramesData[frameB_idx];
-
+            const frameA_idx = 0; const frameB_idx = scanFramesData.length - 1;
+            const frameA = scanFramesData[frameA_idx]; const frameB = scanFramesData[frameB_idx];
             let points3D_final = [];
-            let E, R, t, P1, P2; // OpenCV Mats
-            let goodMatchesPointsA_mat, goodMatchesPointsB_mat;
+            let E, R, t, P1, P2, goodMatchesPointsA_mat, goodMatchesPointsB_mat, inlierMaskMat;
 
             try {
                 updateStatus(`Matching ${frameA_idx} & ${frameB_idx}...`);
                 let matchesVecVec = new cv.DMatchVectorVector();
-                bfMatcher.knnMatch(frameA.cvDescriptors, frameB.cvDescriptors, matchesVecVec, 2); // k=2 for ratio test
-
-                let goodMatches = new cv.DMatchVector();
-                let pts1 = [], pts2 = [];
+                bfMatcher.knnMatch(frameA.cvDescriptors, frameB.cvDescriptors, matchesVecVec, 2);
+                let goodMatches = new cv.DMatchVector(); let pts1 = [], pts2 = [];
                 const ratioThresh = 0.75;
                 for (let i = 0; i < matchesVecVec.size(); ++i) {
-                    let matchPair = matchesVecVec.get(i);
-                    if (matchPair.size() >= 2) {
-                        let m = matchPair.get(0); let n = matchPair.get(1);
-                        if (m.distance < ratioThresh * n.distance) {
-                            goodMatches.push_back(m);
-                            pts1.push(frameA.cvKeypoints.get(m.queryIdx).pt.x, frameA.cvKeypoints.get(m.queryIdx).pt.y);
-                            pts2.push(frameB.cvKeypoints.get(m.trainIdx).pt.x, frameB.cvKeypoints.get(m.trainIdx).pt.y);
-                        }
+                    let mp = matchesVecVec.get(i);
+                    if (mp.size() >= 2 && mp.get(0).distance < ratioThresh * mp.get(1).distance) {
+                        goodMatches.push_back(mp.get(0));
+                        pts1.push(frameA.cvKeypoints.get(mp.get(0).queryIdx).pt.x, frameA.cvKeypoints.get(mp.get(0).queryIdx).pt.y);
+                        pts2.push(frameB.cvKeypoints.get(mp.get(0).trainIdx).pt.x, frameB.cvKeypoints.get(mp.get(0).trainIdx).pt.y);
                     }
                 }
                 matchesVecVec.delete();
@@ -269,131 +278,77 @@
 
                 goodMatchesPointsA_mat = cv.matFromArray(pts1.length / 2, 1, cv.CV_32FC2, pts1);
                 goodMatchesPointsB_mat = cv.matFromArray(pts2.length / 2, 1, cv.CV_32FC2, pts2);
+                inlierMaskMat = new cv.Mat(); // For findEssentialMat's mask output
 
                 updateStatus("Estimating Essential Matrix...");
-                E = cv.findEssentialMat(goodMatchesPointsA_mat, goodMatchesPointsB_mat, K_matrix, cv.RANSAC, 0.999, 1.0, new cv.Mat());
+                E = cv.findEssentialMat(goodMatchesPointsA_mat, goodMatchesPointsB_mat, K_matrix, cv.RANSAC, 0.999, 1.0, inlierMaskMat);
                 if (E.empty()) { throw new Error("Essential Matrix computation failed."); }
+                
+                let inlier_count_E = 0; for(let i=0; i<inlierMaskMat.rows; ++i) if(inlierMaskMat.data[i]) inlier_count_E++;
+                updateStatus(`Essential Matrix found with ${inlier_count_E} inliers.`);
+                if (inlier_count_E < 8) { throw new Error(`Too few inliers for E: ${inlier_count_E}`);}
+
 
                 updateStatus("Recovering Pose...");
-                R = new cv.Mat(); t = new cv.Mat(); let inlierMask = new cv.Mat();
-                let inliersCount = cv.recoverPose(E, goodMatchesPointsA_mat, goodMatchesPointsB_mat, K_matrix, R, t, inlierMask);
-                if (inliersCount === 0) { throw new Error("Recover Pose failed, no inliers."); }
-                updateStatus(`Pose recovered. ${inliersCount} inliers for triangulation.`);
+                R = new cv.Mat(); t = new cv.Mat(); let inlierMaskPose = new cv.Mat(); // Separate mask for recoverPose
+                let inliersCountPose = cv.recoverPose(E, goodMatchesPointsA_mat, goodMatchesPointsB_mat, K_matrix, R, t, inlierMaskPose);
+                if (inliersCountPose === 0) { throw new Error("Recover Pose failed, no inliers."); }
+                updateStatus(`Pose recovered. ${inliersCountPose} inliers for triangulation.`);
 
-                // Filter points using the inlier mask from recoverPose
                 let filteredPts1 = [], filteredPts2 = [];
-                for (let i = 0; i < inlierMask.rows; ++i) {
-                    if (inlierMask.data[i] === 1) { // Check if uchar data[i] is non-zero
+                for (let i = 0; i < inlierMaskPose.rows; ++i) { // Use inlierMaskPose from recoverPose
+                    if (inlierMaskPose.data[i] === 1) {
                         filteredPts1.push(pts1[i*2], pts1[i*2+1]);
                         filteredPts2.push(pts2[i*2], pts2[i*2+1]);
                     }
                 }
                 if (filteredPts1.length / 2 < 4) { throw new Error("Not enough inlier points after recoverPose for triangulation.");}
-                
                 let filteredPts1Mat = cv.matFromArray(filteredPts1.length / 2, 1, cv.CV_32FC2, filteredPts1);
                 let filteredPts2Mat = cv.matFromArray(filteredPts2.length / 2, 1, cv.CV_32FC2, filteredPts2);
 
-
                 updateStatus("Triangulating points...");
-                P1 = cv.Mat.zeros(3, 4, cv.CV_64F); // Projection matrix for first camera (Identity)
-                K_matrix.copyTo(P1.roi(new cv.Rect(0, 0, 3, 3))); // P1 = K * [I|0]
-
-                P2 = new cv.Mat(3, 4, cv.CV_64F); // Projection matrix for second camera
-                let Rt = new cv.Mat(3, 4, cv.CV_64F);
-                cv.hconcat(R, t, Rt); // Rt = [R|t]
-                P2 = K_matrix.matMul(Rt); // P2 = K * [R|t] (Matrix multiplication for 3x3 K and 3x4 Rt)
-                                          // Correct way: P2.setTo(new cv.Scalar(0)); R.copyTo(P2.roi(new cv.Rect(0,0,3,3))); t.copyTo(P2.roi(new cv.Rect(3,0,1,3))); P2 = K_matrix.matMul(P2);
-                                          // Simpler way to construct P2 = K * [R|t]
-                let P2_temp = new cv.Mat();
-                cv.hconcat(R, t, P2_temp); // P2_temp is 3x4 [R|t]
-                for(let r=0; r<3; ++r) { // P2 = K_matrix * P2_temp
-                    for(let c=0; c<4; ++c) {
-                        let sum = 0;
-                        for(let k=0; k<3; ++k) {
-                            sum += K_matrix.doubleAt(r,k) * P2_temp.doubleAt(k,c);
-                        }
-                        P2.doublePtr(r,c)[0] = sum;
-                    }
-                }
-                P2_temp.delete();
-
+                P1 = cv.Mat.zeros(3, 4, cv.CV_64F); K_matrix.copyTo(P1.roi(new cv.Rect(0, 0, 3, 3)));
+                P2 = new cv.Mat(3, 4, cv.CV_64F);
+                let P2_temp_Rt = new cv.Mat(); cv.hconcat(R, t, P2_temp_Rt);
+                for(let r=0; r<3; ++r) for(let c=0; c<4; ++c) { let sum=0; for(let k=0; k<3; ++k) sum += K_matrix.doubleAt(r,k) * P2_temp_Rt.doubleAt(k,c); P2.doublePtr(r,c)[0] = sum; }
+                P2_temp_Rt.delete();
 
                 let points4D = new cv.Mat();
                 cv.triangulatePoints(P1, P2, filteredPts1Mat, filteredPts2Mat, points4D);
-
-                // Convert homogeneous 4D points to 3D and cheirality check
                 for (let i = 0; i < points4D.cols; ++i) {
-                    let W = points4D.floatAt(3, i);
-                    if (Math.abs(W) < 1e-6) continue; // Avoid division by zero
-
-                    let X = points4D.floatAt(0, i) / W;
-                    let Y = points4D.floatAt(1, i) / W;
-                    let Z = points4D.floatAt(2, i) / W;
-
-                    // Cheirality check (point must be in front of first camera)
-                    if (Z > 0) {
-                        // Check for second camera: Transform point to camera 2's coordinate system
-                        // pt_cam2 = R * pt_cam1 + t
-                        // Since R and t define cam2 relative to cam1, we need R_transpose * (pt_cam1 - t)
-                        // Or simpler: check if Z in the triangulated point (which is in cam1's frame)
-                        // when projected into cam2, also has positive depth.
-                        // The Z from recoverPose implies it has chosen a solution where most points are in front.
-                        // A simple Z > 0 check for the first camera and a reasonable distance cut-off might be enough for a demo
-                        if (Z < 10) { // Arbitrary depth cut-off
-                           points3D_final.push(X, Y, Z);
-                        }
-                    }
+                    let W = points4D.floatAt(3, i); if (Math.abs(W) < 1e-6) continue;
+                    let X = points4D.floatAt(0, i)/W, Y = points4D.floatAt(1, i)/W, Z = points4D.floatAt(2, i)/W;
+                    if (Z > 0 && Z < 10) points3D_final.push(X, Y, Z);
                 }
-                points4D.delete(); filteredPts1Mat.delete(); filteredPts2Mat.delete();
+                points4D.delete(); filteredPts1Mat.delete(); filteredPts2Mat.delete(); inlierMaskPose.delete();
                 updateStatus(`Triangulated ${points3D_final.length / 3} 3D points.`);
                 goodMatches.delete();
 
-            } catch (err) {
-                updateStatus(`Error: ${err.message}`);
-                console.error("SfM Error:", err);
+            } catch (err) { updateStatus(`Error: ${err.message.substring(0,100)}`); console.error("SfM Error:", err);
             } finally {
-                // Clean up OpenCV Mats
-                if (E && !E.isDeleted()) E.delete();
-                if (R && !R.isDeleted()) R.delete();
-                if (t && !t.isDeleted()) t.delete();
-                if (P1 && !P1.isDeleted()) P1.delete();
-                if (P2 && !P2.isDeleted()) P2.delete();
+                if (E && !E.isDeleted()) E.delete(); if (R && !R.isDeleted()) R.delete(); if (t && !t.isDeleted()) t.delete();
+                if (P1 && !P1.isDeleted()) P1.delete(); if (P2 && !P2.isDeleted()) P2.delete();
                 if (goodMatchesPointsA_mat && !goodMatchesPointsA_mat.isDeleted()) goodMatchesPointsA_mat.delete();
                 if (goodMatchesPointsB_mat && !goodMatchesPointsB_mat.isDeleted()) goodMatchesPointsB_mat.delete();
-                hideLoading();
-                reconstructButton.disabled = (scanFramesData.length < 2); // Re-enable if scan still valid
+                if (inlierMaskMat && !inlierMaskMat.isDeleted()) inlierMaskMat.delete();
+                hideLoading(); reconstructButton.disabled = (scanFramesData.length < 2);
             }
-
-            if (points3D_final.length > 0) {
-                displaySparsePointCloud(points3D_final);
-                exportButton.disabled = false;
-            } else {
-                updateStatus("No 3D points reconstructed or reconstruction failed.");
-                if (threePointsObject) { // Clear previous points if any
-                    threeScene.remove(threePointsObject);
-                    threePointsObject.geometry.dispose();
-                    threePointsObject.material.dispose();
-                    threePointsObject = null;
-                }
+            if (points3D_final.length > 0) { displaySparsePointCloud(points3D_final); exportButton.disabled = false; }
+            else {
+                updateStatus("No 3D points or reconstruction failed.");
+                if (threePointsObject) { threeScene.remove(threePointsObject); threePointsObject.geometry.dispose(); threePointsObject.material.dispose(); threePointsObject = null; }
             }
         }
 
         function displaySparsePointCloud(pointsDataArray) {
              if (!threeReady) return;
-             if (threePointsObject) { // Remove old points
-                threeScene.remove(threePointsObject);
-                threePointsObject.geometry.dispose();
-                threePointsObject.material.dispose();
-             }
+             if (threePointsObject) { threeScene.remove(threePointsObject); threePointsObject.geometry.dispose(); threePointsObject.material.dispose(); }
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointsDataArray, 3));
-            const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.02 }); // Adjust size as needed
+            const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.02 });
             threePointsObject = new THREE.Points(geometry, material);
             threeScene.add(threePointsObject);
-            updateStatus(`Displaying ${pointsDataArray.length / 3} 3D points. (You might need to host a viewer to see GLB)`);
-
-            // If you had a live THREE.js renderer:
-            // if (threeRenderer) threeRenderer.render(threeScene, threeCamera);
+            updateStatus(`Displaying ${pointsDataArray.length / 3} 3D points.`);
         }
 
         // --- Drawing & Export ---
@@ -411,22 +366,17 @@
             }
             requestAnimationFrame(drawLoop);
         }
-
         function exportGLTF() {
             if (!threeReady || !threePointsObject) { updateStatus("No 3D data to export."); return; }
             updateStatus("Exporting GLB..."); showLoading("Generating GLB...");
             const exporter = new THREE.GLTFExporter();
-            exporter.parse(
-                threePointsObject, // Export only the points object
-                function (gltf) {
-                    saveArrayBuffer(gltf, 'sparse_points.glb');
-                    updateStatus("Sparse points GLB exported."); hideLoading();
-                },
+            exporter.parse( threePointsObject,
+                function (gltf) { saveArrayBuffer(gltf, 'sparse_points.glb'); updateStatus("Sparse points GLB exported."); hideLoading(); },
                 function(error) { console.error('GLTF Export Error:', error); updateStatus("GLTF Export Error."); hideLoading(); },
                 { binary: true, onlyVisible: false }
             );
         }
-        function saveArrayBuffer(buffer, filename) { /* ... (same as before) ... */ 
+        function saveArrayBuffer(buffer, filename) {
             const blob = new Blob([buffer], {type: 'application/octet-stream'});
             const link = document.createElement('a'); link.style.display = 'none'; document.body.appendChild(link);
             link.href = URL.createObjectURL(blob); link.download = filename; link.click();
@@ -435,9 +385,18 @@
 
         // --- Event Listeners & Startup ---
         window.onload = () => {
-            initCameraButton.disabled = true; showLoading("Loading App Resources...");
+            console.log("window.onload event fired.");
+            initCameraButton.disabled = true;
+            showLoading("Loading App Resources...");
             checkThreeJsReady();
-            if (typeof cv !== 'undefined' && cv.getBuildInformation && !cvReady) { onOpenCvReady(); }
+            // OpenCV loading is now primarily handled by onOpenCvScriptLoad and polling
+            // If after a short delay, polling hasn't started (e.g. onOpenCvScriptLoad failed), start it.
+            setTimeout(() => {
+                if(!cvReady && !cvPollInterval) { // If not ready and not already polling
+                    console.log("window.onload: Fallback - starting CV polling as it seems not to have started.");
+                    startCvPolling();
+                }
+            }, 500);
         };
         initCameraButton.addEventListener('click', initCamera);
         startScanButton.addEventListener('click', startScan);
